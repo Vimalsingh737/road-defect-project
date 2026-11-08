@@ -43,7 +43,9 @@ export default function App() {
   const [reports, setReports] = useState([]);
 
   useEffect(() => {
-    axios.get(BACKEND_URL).then((res) => setReports(res.data)).catch(console.error);
+    // Wake up AI server automatically when page opens
+    axios.get(`${AI_URL}/docs`).catch(() => {});
+    axios.get(BACKEND_URL).then((res) => setReports(res.data)).catch(() => {});
   }, []);
 
   const handleAnalyze = async (e) => {
@@ -58,17 +60,32 @@ export default function App() {
 
     try {
       const endpoint = mode === "image" ? "/predict-image" : "/predict-video";
-      const aiRes = await axios.post(`${AI_URL}${endpoint}?conf=${conf}`, formData);
+      const aiRes = await axios.post(`${AI_URL}${endpoint}?conf=${conf}`, formData, {
+        timeout: 90000,
+      });
       setResult(aiRes.data);
 
-      const savedRes = await axios.post(BACKEND_URL, {
+      // Save to backend if online; otherwise place pin directly on the map
+      const fallbackReport = {
+        id: Date.now(),
+        status: "Pending Repair",
         lat: coords[0],
         lng: coords[1],
         ...aiRes.data,
-      });
-      setReports((prev) => [savedRes.data, ...prev]);
+      };
+
+      try {
+        const savedRes = await axios.post(BACKEND_URL, {
+          lat: coords[0],
+          lng: coords[1],
+          ...aiRes.data,
+        });
+        setReports((prev) => [savedRes.data, ...prev]);
+      } catch {
+        setReports((prev) => [fallbackReport, ...prev]);
+      }
     } catch (err) {
-      alert("Server is waking up or busy. Please wait 20 seconds and try again!");
+      alert(`AI Server Error (${err.message}). Wait 25 seconds for Render to wake up and try again!`);
       console.error(err);
     } finally {
       setLoading(false);
@@ -76,8 +93,18 @@ export default function App() {
   };
 
   const toggleStatus = async (id) => {
-    const res = await axios.patch(`${BACKEND_URL}/${id}`);
-    setReports((prev) => prev.map((r) => (r.id === id ? res.data : r)));
+    try {
+      const res = await axios.patch(`${BACKEND_URL}/${id}`);
+      setReports((prev) => prev.map((r) => (r.id === id ? res.data : r)));
+    } catch {
+      setReports((prev) =>
+        prev.map((r) =>
+          r.id === id
+            ? { ...r, status: r.status === "Resolved" ? "Pending Repair" : "Resolved" }
+            : r
+        )
+      );
+    }
   };
 
   return (
@@ -91,7 +118,7 @@ export default function App() {
         </p>
       </header>
 
-      <div style={{ maxWidth: "1280px", margin: "0 auto", display: "grid", gridTemplateColumns: "1fr 1.3fr", gap: "24px" }}>
+      <div style={{ maxWidth: "1280px", margin: "0 auto", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "24px" }}>
         <div style={{ background: "#1e293b", padding: "20px", borderRadius: "12px", border: "1px solid #334155" }}>
           <div style={{ display: "flex", gap: "10px", marginBottom: "16px" }}>
             <button
@@ -115,7 +142,7 @@ export default function App() {
               type="file"
               accept={mode === "image" ? "image/*" : "video/*"}
               onChange={(e) => setFile(e.target.files[0])}
-              style={{ width: "100%", marginBottom: "14px", padding: "10px", background: "#0f172a", borderRadius: "8px", border: "1px solid #475569" }}
+              style={{ width: "100%", boxSizing: "border-box", marginBottom: "14px", padding: "10px", background: "#0f172a", borderRadius: "8px", border: "1px solid #475569" }}
             />
 
             <label style={{ display: "block", fontSize: "13px", marginBottom: "6px", color: "#cbd5e1" }}>
