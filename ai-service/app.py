@@ -2,6 +2,7 @@ import os
 import gc
 import uuid
 import base64
+import subprocess
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -23,7 +24,6 @@ OUTPUT_DIR = "outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
-# Load ONNX Runtime with minimal memory footprint for Render 512MB Free Tier
 sess_options = ort.SessionOptions()
 sess_options.intra_op_num_threads = 1
 sess_options.inter_op_num_threads = 1
@@ -44,17 +44,16 @@ def sigmoid(x):
 
 def run_yolo_seg(frame, conf_thres=0.15, iou_thres=0.45):
     orig_h, orig_w = frame.shape[:2]
-    # Preprocess image to 640x640
     img = cv2.resize(frame, (640, 640))
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     tensor = np.transpose(img_rgb, (2, 0, 1))[None, ...]
 
     outputs = session.run(None, {input_name: tensor})
-    preds = np.squeeze(outputs[0])   # (4 + nc + 32, 8400)
-    protos = np.squeeze(outputs[1])  # (32, 160, 160)
+    preds = np.squeeze(outputs[0])
+    protos = np.squeeze(outputs[1])
 
     if preds.shape[0] < preds.shape[1]:
-        preds = preds.T  # (8400, 4 + nc + 32)
+        preds = preds.T
 
     num_mask = protos.shape[0]
     nc = preds.shape[1] - 4 - num_mask
@@ -79,7 +78,6 @@ def run_yolo_seg(frame, conf_thres=0.15, iou_thres=0.45):
             "priority": "Clear",
         }
 
-    # Convert center-xywh to top-left-xywh for OpenCV NMS
     boxes_nms = []
     for b in boxes_xywh:
         x1 = float(b[0] - b[2] / 2)
@@ -96,12 +94,11 @@ def run_yolo_seg(frame, conf_thres=0.15, iou_thres=0.45):
             "priority": "Clear",
         }
 
-    indices = np.array(indices).flatten()[:15]  # Cap max detections per frame
+    indices = np.array(indices).flatten()[:15]
     boxes_xywh = boxes_xywh[indices]
     scores = scores[indices]
     mask_coeffs = mask_coeffs[indices]
 
-    # Decode segmentation masks at 160x160
     protos_flat = protos.reshape(num_mask, -1)
     masks_raw = sigmoid(np.matmul(mask_coeffs, protos_flat)).reshape(-1, 160, 160)
 
@@ -117,7 +114,6 @@ def run_yolo_seg(frame, conf_thres=0.15, iou_thres=0.45):
         m[my1:my2, mx1:mx2] = (masks_raw[i, my1:my2, mx1:mx2] > 0.5).astype(np.uint8)
         combined_mask_160 = np.maximum(combined_mask_160, m)
 
-    # Calculate defect area metrics
     defect_ratio = float(np.sum(combined_mask_160)) / (160.0 * 160.0)
     area_ratio = round(defect_ratio * 100, 2)
     defect_pixels = int(defect_ratio * orig_w * orig_h)
@@ -131,10 +127,9 @@ def run_yolo_seg(frame, conf_thres=0.15, iou_thres=0.45):
         else "Clear"
     )
 
-    # Draw segmentation overlay and bounding boxes on the image
     full_mask = cv2.resize(combined_mask_160, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
     overlay = annotated.copy()
-    overlay[full_mask == 1] = [0, 69, 255]  # Bright orange-red highlight on pothole pixels
+    overlay[full_mask == 1] = [0, 69, 255]
     annotated = cv2.addWeighted(overlay, 0.45, annotated, 0.55, 0)
 
     for i, box in enumerate(boxes_xywh):
@@ -192,6 +187,7 @@ async def predict_image(file: UploadFile = File(...), conf: float = 0.15):
 async def predict_video(file: UploadFile = File(...), conf: float = 0.15):
     file_id = str(uuid.uuid4())[:8]
     input_path = os.path.join(OUTPUT_DIR, f"in_{file_id}.mp4")
+    raw_path = os.path.join(OUTPUT_DIR, f"raw_{file_id}.mp4")
     output_filename = f"out_{file_id}.mp4"
     output_path = os.path.join(OUTPUT_DIR, output_filename)
 
@@ -203,11 +199,12 @@ async def predict_video(file: UploadFile = File(...), conf: float = 0.15):
     orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 360
     fps = int(cap.get(cv2.CAP_PROP_FPS)) or 20
 
-    width = 480 if orig_w > 480 else orig_w
-    height = int(orig_h * (width / orig_w)) if orig_w > 480 else orig_h
+    # Even dimensions required by H.264 encoder
+    width = 480 if orig_w > 480 else (orig_w // 2) * 2
+    height = (int(orig_h * (width / orig_w)) // 2) * 2
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    out = cv2.VideoWriter(raw_path, fourcc, fps, (width, height))
 
     frame_idx = 0
     max_frames = 90
@@ -250,13 +247,31 @@ async def predict_video(file: UploadFile = File(...), conf: float = 0.15):
 
     cap.release()
     out.release()
-    if os.path.exists(input_path):
-        os.remove(input_path)
+
+    # Convert to browser-playable H.264 MP4 using ffmpeg
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", raw_path,
+            "-vcodec", "libx264", "-pix_fmt", "yuv420p",
+            "-preset", "ultrafast", "-crf", "28",
+            "-movflags", "+faststart", output_path,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    final_file = output_path if os.path.exists(output_path) else raw_path
+    with open(final_file, "rb") as vf:
+        video_b64 = base64.b64encode(vf.read()).decode("utf-8")
+
+    for p in (input_path, raw_path, output_path):
+        if os.path.exists(p):
+            os.remove(p)
     gc.collect()
 
     return {
         "media_type": "video",
         **peak_metrics,
-        "video_url": f"https://road-defect-project.onrender.com/outputs/{output_filename}",
+        "video_url": f"data:video/mp4;base64,{video_b64}",
         "annotated_image_base64": worst_frame_b64,
     }
