@@ -4,8 +4,8 @@ import { MapContainer, TileLayer, Marker, Popup, useMapEvents } from "react-leaf
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
-const AI_URL = "http://127.0.0.1:8000";
-const BACKEND_URL = "http://localhost:5000/api/reports";
+const AI_URL = "https://road-defect-project.onrender.com";
+const BACKEND_URL = "https://road-defect-backend.onrender.com/api/reports";
 
 const createPinIcon = (priority, status) => {
   const color =
@@ -68,7 +68,7 @@ export default function App() {
       });
       setReports((prev) => [savedRes.data, ...prev]);
     } catch (err) {
-      alert("Make sure both FastAPI (port 8000) and Node Backend (port 5000) are running!");
+      alert("Server is waking up or busy. Please wait 20 seconds and try again!");
       console.error(err);
     } finally {
       setLoading(false);
@@ -162,7 +162,13 @@ export default function App() {
               {result.media_type === "image" ? (
                 <img src={result.annotated_image_base64} alt="Segmented" style={{ width: "100%", borderRadius: "8px" }} />
               ) : (
-                <video src={result.video_url} controls autoPlay loop style={{ width: "100%", borderRadius: "8px" }} />
+                <video
+                  src={result.video_url ? result.video_url.replace("http://127.0.0.1:8000", AI_URL) : ""}
+                  controls
+                  autoPlay
+                  loop
+                  style={{ width: "100%", borderRadius: "8px" }}
+                />
               )}
             </div>
           )}
