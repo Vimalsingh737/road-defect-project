@@ -7,6 +7,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+ENV OMP_NUM_THREADS=1
+ENV MALLOC_TRIM_THRESHOLD_=65536
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
