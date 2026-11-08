@@ -38,13 +38,13 @@ export default function App() {
   const [file, setFile] = useState(null);
   const [conf, setConf] = useState(0.15);
   const [loading, setLoading] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
   const [result, setResult] = useState(null);
   const [coords, setCoords] = useState([25.2425, 86.9842]);
   const [reports, setReports] = useState([]);
 
   useEffect(() => {
-    // Wake up AI server automatically when page opens
-    axios.get(`${AI_URL}/docs`).catch(() => {});
+    axios.get(`${AI_URL}/`).catch(() => {});
     axios.get(BACKEND_URL).then((res) => setReports(res.data)).catch(() => {});
   }, []);
 
@@ -54,19 +54,23 @@ export default function App() {
 
     setLoading(true);
     setResult(null);
+    setStatusMsg("Connecting to AI Server...");
 
     const formData = new FormData();
     formData.append("file", file);
 
     try {
+      // Wake up AI server first if it was sleeping
+      await axios.get(`${AI_URL}/`, { timeout: 60000 }).catch(() => {});
+      setStatusMsg(`Running YOLOv8 Segmentation on ${mode}...`);
+
       const endpoint = mode === "image" ? "/predict-image" : "/predict-video";
       const aiRes = await axios.post(`${AI_URL}${endpoint}?conf=${conf}`, formData, {
-        timeout: 90000,
+        timeout: 120000,
       });
       setResult(aiRes.data);
 
-      // Save to backend if online; otherwise place pin directly on the map
-      const fallbackReport = {
+      const newPin = {
         id: Date.now(),
         status: "Pending Repair",
         lat: coords[0],
@@ -79,16 +83,17 @@ export default function App() {
           lat: coords[0],
           lng: coords[1],
           ...aiRes.data,
-        });
+        }, { timeout: 8000 });
         setReports((prev) => [savedRes.data, ...prev]);
       } catch {
-        setReports((prev) => [fallbackReport, ...prev]);
+        setReports((prev) => [newPin, ...prev]);
       }
     } catch (err) {
-      alert(`AI Server Error (${err.message}). Wait 25 seconds for Render to wake up and try again!`);
+      alert(`AI Request Failed: ${err.response?.data?.detail || err.message}`);
       console.error(err);
     } finally {
       setLoading(false);
+      setStatusMsg("");
     }
   };
 
@@ -108,18 +113,18 @@ export default function App() {
   };
 
   return (
-    <div style={{ fontFamily: "system-ui, sans-serif", background: "#0f172a", minHeight: "100vh", color: "#f8fafc", padding: "24px" }}>
+    <div style={{ fontFamily: "system-ui, sans-serif", background: "#0f172a", minHeight: "100vh", color: "#f8fafc", padding: "16px" }}>
       <header style={{ maxWidth: "1280px", margin: "0 auto 20px", borderBottom: "1px solid #334155", paddingBottom: "14px" }}>
-        <h1 style={{ margin: 0, fontSize: "26px", color: "#38bdf8" }}>
+        <h1 style={{ margin: 0, fontSize: "24px", color: "#38bdf8" }}>
           Road Surface Segmentation & Severity Estimator
         </h1>
-        <p style={{ margin: "6px 0 0", color: "#94a3b8", fontSize: "14px" }}>
+        <p style={{ margin: "6px 0 0", color: "#94a3b8", fontSize: "13px" }}>
           YOLOv8-Seg ONNX Engine • FastAPI + Node.js + React Leaflet GIS Dashboard
         </p>
       </header>
 
-      <div style={{ maxWidth: "1280px", margin: "0 auto", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "24px" }}>
-        <div style={{ background: "#1e293b", padding: "20px", borderRadius: "12px", border: "1px solid #334155" }}>
+      <div style={{ maxWidth: "1280px", margin: "0 auto", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(310px, 1fr))", gap: "20px" }}>
+        <div style={{ background: "#1e293b", padding: "18px", borderRadius: "12px", border: "1px solid #334155" }}>
           <div style={{ display: "flex", gap: "10px", marginBottom: "16px" }}>
             <button
               type="button"
@@ -142,7 +147,7 @@ export default function App() {
               type="file"
               accept={mode === "image" ? "image/*" : "video/*"}
               onChange={(e) => setFile(e.target.files[0])}
-              style={{ width: "100%", boxSizing: "border-box", marginBottom: "14px", padding: "10px", background: "#0f172a", borderRadius: "8px", border: "1px solid #475569" }}
+              style={{ width: "100%", boxSizing: "border-box", marginBottom: "14px", padding: "10px", background: "#0f172a", borderRadius: "8px", border: "1px solid #475569", color: "#f8fafc" }}
             />
 
             <label style={{ display: "block", fontSize: "13px", marginBottom: "6px", color: "#cbd5e1" }}>
@@ -163,7 +168,7 @@ export default function App() {
               disabled={loading}
               style={{ width: "100%", padding: "12px", borderRadius: "8px", border: "none", fontWeight: "700", background: loading ? "#475569" : "#10b981", color: "white", cursor: "pointer" }}
             >
-              {loading ? "Running YOLOv8 Segmentation..." : `Analyze ${mode === "image" ? "Photo" : "Video"}`}
+              {loading ? statusMsg || "Processing..." : `Analyze ${mode === "image" ? "Photo" : "Video"}`}
             </button>
           </form>
 
@@ -186,26 +191,44 @@ export default function App() {
                 </div>
               </div>
 
-              {result.media_type === "image" ? (
-                <img src={result.annotated_image_base64} alt="Segmented" style={{ width: "100%", borderRadius: "8px" }} />
-              ) : (
-                <video
-                  src={result.video_url ? result.video_url.replace("http://127.0.0.1:8000", AI_URL) : ""}
-                  controls
-                  autoPlay
-                  loop
-                  style={{ width: "100%", borderRadius: "8px" }}
-                />
+              {result.annotated_image_base64 && (
+                <div style={{ marginBottom: "12px" }}>
+                  <div style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "6px" }}>
+                    {result.media_type === "video" ? "Peak Severity Frame Detected:" : "Segmented Road Surface:"}
+                  </div>
+                  <img src={result.annotated_image_base64} alt="Segmented" style={{ width: "100%", borderRadius: "8px" }} />
+                </div>
+              )}
+
+              {result.media_type === "video" && result.video_url && (
+                <div>
+                  <video
+                    src={result.video_url}
+                    controls
+                    autoPlay
+                    loop
+                    playsInline
+                    style={{ width: "100%", borderRadius: "8px" }}
+                  />
+                  <a
+                    href={result.video_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ display: "block", textAlign: "center", marginTop: "8px", color: "#38bdf8", fontSize: "13px" }}
+                  >
+                    Download Annotated Video (.mp4)
+                  </a>
+                </div>
               )}
             </div>
           )}
         </div>
 
-        <div style={{ background: "#1e293b", padding: "20px", borderRadius: "12px", border: "1px solid #334155" }}>
-          <h3 style={{ margin: "0 0 10px", fontSize: "17px" }}>
+        <div style={{ background: "#1e293b", padding: "18px", borderRadius: "12px", border: "1px solid #334155" }}>
+          <h3 style={{ margin: "0 0 10px", fontSize: "16px" }}>
             Live GIS Repair Priority Map (Click map to place pin: {coords[0].toFixed(4)}, {coords[1].toFixed(4)})
           </h3>
-          <div style={{ height: "520px", borderRadius: "10px", overflow: "hidden" }}>
+          <div style={{ height: "480px", borderRadius: "10px", overflow: "hidden" }}>
             <MapContainer center={coords} zoom={14} style={{ height: "100%", width: "100%" }}>
               <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
               <LocationPicker setCoords={setCoords} />
